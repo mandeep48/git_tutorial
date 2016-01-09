@@ -3,6 +3,7 @@
 # in that file
 for filename in data/*.txt
 do
+    date	
     echo $filename
     grep -v Species $filename | cut -d, -f2 | sort | uniq -c
 done
