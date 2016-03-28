@@ -21,7 +21,10 @@ public class WordFrequencyCalculator {
 
 		Scanner inputScanner=null;
 		try {
-			inputScanner = new Scanner(new File("corpus_sports.txt"));
+			inputScanner = new Scanner(new File("taggers/test.txt"));
+			inputScanner.useDelimiter("\\Z");
+
+			System.out.println("------"+inputScanner.next().toLowerCase());
 		} catch (FileNotFoundException e) {
 			System.out.println("File is not present in the root directory");
 			e.printStackTrace();

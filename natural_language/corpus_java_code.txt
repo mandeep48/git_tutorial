@@ -1,0 +1,351 @@
+/*------------------------------------------------------------------------------
+ *
+ * File: ReserveAmountExecutor.java
+ *
+ *******************************************************************************
+ * COPYRIGHT Testing 2014
+ *
+ * The copyright to the computer program(s) herein is the property of
+ * Testing Inc. The programs may be used and/or copied only with written
+ * permission from Testing Inc. or in accordance with the terms and
+ * conditions stipulated in the agreement/contract under which the
+ * program(s) have been supplied.
+ *******************************************************************************
+ *
+ * List of classes: ReserveAmountExecutor
+ *
+ *----------------------------------------------------------------------------*/
+package com.Testing.sdg.adapters.service.spendingbucket.executor;
+
+import java.math.BigDecimal;
+import java.text.ParseException;
+import java.util.Calendar;
+import java.util.Date;
+
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.csapi.wsdl.parlayx.payment.reserve_amount_charging.v2_0.service.ServiceException;
+
+import com.Testing.sdg.adapters.service.spendingbucket.config.SpendingBucketConstants;
+import com.Testing.sdg.adapters.service.spendingbucket.util.BillingTxtParameter;
+import com.Testing.sdg.adapters.service.spendingbucket.util.BucketRollOverUtil;
+import com.Testing.sdg.adapters.service.spendingbucket.util.ReservationCleanup;
+import com.Testing.sdg.adapters.service.spendingbucket.util.SpendingBucketUtil;
+import com.Testing.sdg.spendingbucket.db.SpendingBucketDB;
+import com.Testing.sdg.spendingbucket.db.dto.SpendingBktDTO;
+import com.Testing.sdg.spendingbucket.db.dto.SpendingBktFutReservationsDTO;
+import com.Testing.sdg.spendingbucket.db.dto.SpendingBktReservationsDTO;
+import com.Testing.sdg.spendingbucket.db.exception.SpendingBucketDBException;
+/**
+ * ReserveAmountExecutor <br>
+ * 
+ * Revision History:<br>
+ * 1.0 - Original release<br>
+ * 
+ * @author evyzadn
+ * @version 1.0, 2014/06/20
+ * 
+ */
+
+public class ReserveAmountExecutor {
+
+	private static Logger log = LoggerFactory.getLogger(ReserveAmountExecutor.class);
+	private SpendingBucketDB spendingBucketDb = SpendingBucketDB.getInstance();
+	private static volatile ReserveAmountExecutor instance = null;
+
+	/**
+	 * @return Returns singleton instance of ReserveAmountExecutor
+	 */
+	public static synchronized ReserveAmountExecutor getInstance()
+			throws ServiceException {
+		if (instance == null) {
+			log.debug("Getting an instance of ReserveAmountExecutor");
+			try {
+				instance = new ReserveAmountExecutor();
+			} catch (Exception e) {
+				log.error("Exception has occured while creating the instance of ReserveAmountExecutor"+e.getMessage());
+				throw new ServiceException("Error while creating the instance of ReserveAmountExecutor",
+						SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE, e.getMessage()));
+			}
+		}
+		return instance;
+	}
+
+	public String reserveAmount(String endUserIdentifier, BigDecimal amount,
+			String billingText) throws ServiceException {
+
+		try {
+			BillingTxtParameter billingTxtParam = new BillingTxtParameter(billingText);
+			if(SpendingBucketUtil.isNotNullOrEmpty(endUserIdentifier)){
+
+				log.info("Inside Reserve Amount Executor for MSISDN :: "+endUserIdentifier);
+				SpendingBktDTO spendingBktDTO = null;
+				spendingBktDTO = spendingBucketDb
+						.getDataReader().getSpendingBucketByMSISDN(
+								new BigDecimal(endUserIdentifier));
+				if(null != spendingBktDTO){
+					log.debug("User is present in Spending Bucket DB for MSISDN ::" +endUserIdentifier);
+
+					ReservationCleanup.cleanUpExpiredReservations(new BigDecimal(endUserIdentifier));
+					if(null !=billingTxtParam.getBillCycleDate()){
+						SpendingBucketUtil.alignBktRollOverDateWithBillCycleDate(billingTxtParam.getBillCycleDate(), new BigDecimal(endUserIdentifier));
+					}
+					BucketRollOverUtil.checkAndRollOverBillCycleDate(new BigDecimal(endUserIdentifier));
+					log.debug("ReserveAmountExecutor : Cleanup and Bucketrollover is completed for MSISDN ::"+endUserIdentifier);
+					spendingBktDTO = spendingBucketDb
+							.getDataReader().getSpendingBucketByMSISDN(
+									new BigDecimal(endUserIdentifier));
+
+					return proceedWhenUserExits(endUserIdentifier,amount,billingTxtParam,spendingBktDTO);
+				}else{
+					SpendingBktDTO spendingBktDTONewUser = new SpendingBktDTO();
+					spendingBktDTONewUser.setMsisdn(new BigDecimal(endUserIdentifier));
+					Calendar cal =Calendar.getInstance();
+					if(billingTxtParam.getBillCycleDate()!=null){
+						cal.setTime(billingTxtParam.getBillCycleDate());
+						spendingBktDTONewUser.setBillCycleDate(cal);
+					}
+
+					spendingBktDTONewUser.setBucketSize(new BigDecimal(SpendingBucketUtil
+							.isNotNullOrEmpty(SpendingBucketUtil
+									.getPropertyValue(SpendingBucketConstants.DEFAULT_BUCKET_SIZE)) ? SpendingBucketUtil
+											.getPropertyValue(SpendingBucketConstants.DEFAULT_BUCKET_SIZE)
+											: "80"));  
+
+					spendingBktDTONewUser.setCurrentBucket(new BigDecimal(SpendingBucketUtil
+							.isNotNullOrEmpty(SpendingBucketUtil
+									.getPropertyValue(SpendingBucketConstants.DEFAULT_BUCKET_SIZE)) ? SpendingBucketUtil
+											.getPropertyValue(SpendingBucketConstants.DEFAULT_BUCKET_SIZE)
+											: "80"));
+
+					spendingBktDTONewUser.setNextBucket(new BigDecimal(SpendingBucketUtil
+							.isNotNullOrEmpty(SpendingBucketUtil
+									.getPropertyValue(SpendingBucketConstants.DEFAULT_BUCKET_SIZE)) ? SpendingBucketUtil
+											.getPropertyValue(SpendingBucketConstants.DEFAULT_BUCKET_SIZE)
+											: "80"));
+					try {
+
+						spendingBucketDb.getDataCreator().createSpendingBucketRecord(spendingBktDTONewUser);
+					} catch(SpendingBucketDBException sbdbex) {
+						log.debug("Error Code while creating the Spending bucket profile is " +sbdbex.getCode());
+						if (sbdbex.getCode().equals(SpendingBucketConstants.SPENDING_BUCKET_UNIQUE_CONSTRAINT_ERROR_CODE)){
+							SpendingBktDTO latestSpendingBktDTO = null;
+							latestSpendingBktDTO = spendingBucketDb
+									.getDataReader().getSpendingBucketByMSISDN(
+											new BigDecimal(endUserIdentifier));
+							if(null != latestSpendingBktDTO){
+								log.debug("User is present in Spending Bucket DB for MSISDN when fetch again ::" +endUserIdentifier);
+
+								ReservationCleanup.cleanUpExpiredReservations(new BigDecimal(endUserIdentifier));
+								if(null !=billingTxtParam.getBillCycleDate()){
+									SpendingBucketUtil.alignBktRollOverDateWithBillCycleDate(billingTxtParam.getBillCycleDate(), new BigDecimal(endUserIdentifier));
+								}
+								BucketRollOverUtil.checkAndRollOverBillCycleDate(new BigDecimal(endUserIdentifier));
+								log.debug("ReserveAmountExecutor : Cleanup and Bucketrollover is completed for MSISDN when do it again::"+endUserIdentifier);
+								latestSpendingBktDTO = spendingBucketDb
+										.getDataReader().getSpendingBucketByMSISDN(
+												new BigDecimal(endUserIdentifier));
+								return proceedWhenUserExits(endUserIdentifier,amount,billingTxtParam,latestSpendingBktDTO);
+							} else {
+								log.error("UniqueConstraint Error has occured, but still spendingbucket profile does'nt exist. Hence throwing the same exception for msisdn :" +endUserIdentifier);
+								throw sbdbex;
+							}
+
+						} else {
+							throw sbdbex;
+						}
+					}
+					return proceedWhenUserExits(endUserIdentifier,amount,billingTxtParam,spendingBktDTONewUser);
+				}
+
+			}else{
+				log.error("Msisdn in not present in the request :: "+endUserIdentifier);
+				throw new ServiceException("Msisdn in not present in the request",SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE, SpendingBucketUtil.getPropertyValue(SpendingBucketConstants.SPENDING_BUCKET_REQUEST_MSISDN_MISSING)));
+			}
+
+		} catch (SpendingBucketDBException e) {
+			log.error("DB Error has happened while doing Reserve for MSISDN "+endUserIdentifier+", Errorcode is : "+e.getCode()+ " ErrorMessage is "+e.getMessage());
+			throw new ServiceException("DB Error occured while doing Reserve for MSISDN : "+endUserIdentifier,SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE, e.getMessage()));
+		}catch (ParseException e) {
+			log.error("Error happened while parsing the date for MSISDN : "+endUserIdentifier);
+			throw new ServiceException("InValid Request for MSISDN : "+endUserIdentifier,SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_INPUT_INVALID_ERROR_CODE, SpendingBucketUtil.getPropertyValue(SpendingBucketConstants.SPENDING_BUCKET_UNABLE_TO_PARSE_DATE)));
+		}
+		catch (ServiceException e) {
+			throw e;
+		}
+		catch (Exception e) {
+			log.error("Unknown Exception has occured while doing Reserve for MSISDN : "+endUserIdentifier+", ErrorMessage is "+e.getMessage());
+			throw new ServiceException("Unknown Error for MSISDN : "+endUserIdentifier,SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE, e.getMessage()));
+		}
+	}
+
+	public String proceedWhenUserExits(String endUserIdentifier,BigDecimal amount,BillingTxtParameter billingTxtParam,SpendingBktDTO spendingBktDTO) throws SpendingBucketDBException, ServiceException{
+		if(billingTxtParam.isPreCommitFlag()){
+			log.info("Inside Pre Commit flag case");
+			String reservationDuration = SpendingBucketUtil
+					.getPropertyValue(SpendingBucketConstants.RESERVATION_DURATION);
+			int reservationDurationHour = SpendingBucketUtil.isNotNullOrEmpty(reservationDuration) ? Integer
+					.parseInt(reservationDuration) : 0;
+					log.info("Reservation Duration from property file :: "+reservationDurationHour);	
+					Calendar cal = Calendar.getInstance();
+					cal.setTime(new Date());
+					cal.add(Calendar.HOUR, reservationDurationHour);
+					log.info("Actual record before updating pre commit lock timestamp :: "+spendingBktDTO.toString());
+					//spendingBktDTO.setPreCommitLockTimestamp(cal);
+					//spendingBucketDb.getDataUpdator().updateSpendingBucketRecord(spendingBktDTO);
+					spendingBucketDb.getDataUpdator().updatePrecommitTimeOfSpendingBucket(spendingBktDTO.getMsisdn(), cal);
+					return proceedForRenewalCheck(endUserIdentifier,amount,billingTxtParam,spendingBktDTO);
+		}else{
+			return proceedForRenewalCheck(endUserIdentifier,amount,billingTxtParam,spendingBktDTO);
+		}
+	}
+
+	public String proceedForRenewalCheck(String endUserIdentifier,BigDecimal amount,BillingTxtParameter billingTxtParam,SpendingBktDTO spendingBktDTO) throws SpendingBucketDBException, ServiceException{		
+		if(checkForRenewal(billingTxtParam)){
+
+			if(null !=billingTxtParam.getPurchaseID()){
+				// modify this method on basis for subscription id to do
+
+				SpendingBktFutReservationsDTO spendingBktFutReservationsDTO = spendingBucketDb.getDataReader().getSpendingBktFutRevsByPurchaseId(billingTxtParam.getPurchaseID());
+				if(null !=spendingBktFutReservationsDTO){
+
+					SpendingBktReservationsDTO spendingBktReservationsDTO = new SpendingBktReservationsDTO();
+					spendingBktReservationsDTO.setSpendingBkt(spendingBktFutReservationsDTO.getSpendingBkt());
+					if(SpendingBucketUtil.isNotNullOrEmpty(billingTxtParam.getReservationId())){
+						spendingBktReservationsDTO.setReservationId(billingTxtParam.getReservationId());
+					}
+					if(SpendingBucketUtil.isNotNullOrEmpty(billingTxtParam.getPurchaseID())){
+						spendingBktReservationsDTO.setPurchaseId(billingTxtParam.getPurchaseID());
+					}
+					if(null != spendingBktFutReservationsDTO.getReservationTimestamp()){
+						spendingBktReservationsDTO.setReservationTimestamp(spendingBktFutReservationsDTO.getReservationTimestamp());
+					}
+					if(null !=billingTxtParam.getReservationValidUntilTimestamp()){
+						Calendar cal = Calendar.getInstance();
+						cal.setTime(billingTxtParam.getReservationValidUntilTimestamp());
+						spendingBktReservationsDTO.setReservationExpiryTimestamp(cal);
+					}
+					if(null !=spendingBktFutReservationsDTO.getAmount()){
+						spendingBktReservationsDTO.setAmount(spendingBktFutReservationsDTO.getAmount());
+					}
+
+					if(SpendingBucketUtil.isNotNullOrEmpty(billingTxtParam.getPurchaseType())){
+						spendingBktReservationsDTO.setPurchaseType(billingTxtParam.getPurchaseType());
+					}
+					//creating record in current reservation table
+					spendingBucketDb.getDataCreator().createSpendingBucketReservationRecord(spendingBktReservationsDTO);
+					//createCurrentReservationRecord(spendingBktReservationsDTO);
+					//deleting future reservation record
+					spendingBucketDb.getDataDeletor().deleteSpendingBucketFutRevByPrimaryKey(spendingBktFutReservationsDTO.getSpendingBktFutResId());
+					log.debug("Successfully deleted SpendingBucketFutureRes Record");
+					return billingTxtParam.getReservationId();
+				}else{
+					return proceedForCurrentBucketAvailiabilty(endUserIdentifier,amount,billingTxtParam,spendingBktDTO);
+				}
+			}
+			else {
+				log.info("Purchased ID is Null for MSISDN : " +endUserIdentifier);
+				return proceedForCurrentBucketAvailiabilty(endUserIdentifier,amount,billingTxtParam,spendingBktDTO);
+			}
+		}else{
+			return proceedForCurrentBucketAvailiabilty(endUserIdentifier,amount,billingTxtParam,spendingBktDTO);
+		}
+
+	}
+
+	public String proceedForCurrentBucketAvailiabilty(String endUserIdentifier,BigDecimal amount,BillingTxtParameter billingTxtParam,SpendingBktDTO spendingBktDTO) throws SpendingBucketDBException, ServiceException{
+		log.info("In proceedForCurrentBucketAvailiabilty endUserIdentifier : "
+				+endUserIdentifier+ ",SpendingBktDTO is :"+spendingBktDTO);
+		//if(null !=spendingBktDTO.getCurrentBucket()){
+			//BigDecimal currentAvailabilty =spendingBktDTO.getCurrentBucket();
+			//if(currentAvailabilty.compareTo(amount) ==1  || currentAvailabilty.compareTo(amount) ==0){
+				SpendingBktReservationsDTO spendingBktReservationsDTO = new SpendingBktReservationsDTO();
+				spendingBktReservationsDTO.setSpendingBkt(spendingBktDTO);
+				if(null != billingTxtParam.getReservationId()){
+					// to change once we start giving reservation identifier in request
+					spendingBktReservationsDTO.setReservationId(billingTxtParam.getReservationId());
+				}
+				if(null != billingTxtParam.getPurchaseID()){
+					spendingBktReservationsDTO.setPurchaseId(billingTxtParam.getPurchaseID());
+				}
+
+				if(null != billingTxtParam.getPurchaseTimeStamp()){
+					Calendar resTimeCal = Calendar.getInstance();
+					resTimeCal.setTime(billingTxtParam.getPurchaseTimeStamp());
+					spendingBktReservationsDTO.setReservationTimestamp(resTimeCal);
+				}
+				if(null !=billingTxtParam.getReservationValidUntilTimestamp()){
+					Calendar resExpTimeCal = Calendar.getInstance();
+					resExpTimeCal.setTime(billingTxtParam.getReservationValidUntilTimestamp());
+					spendingBktReservationsDTO.setReservationExpiryTimestamp(resExpTimeCal);
+				}
+				if(null !=amount){
+					spendingBktReservationsDTO.setAmount(amount);
+				}
+
+				if(SpendingBucketUtil.isNotNullOrEmpty(billingTxtParam.getPurchaseType())){
+					spendingBktReservationsDTO.setPurchaseType(billingTxtParam.getPurchaseType());
+				}
+
+				spendingBucketDb.getDataCreator().createSpendingBucketReservationRecord(spendingBktReservationsDTO);
+				//createCurrentReservationRecord(spendingBktReservationsDTO);
+
+				//BigDecimal remainingAmountInCurrentBucket = currentAvailabilty.subtract(amount);
+				//spendingBktDTO.setCurrentBucket(remainingAmountInCurrentBucket);
+				//spendingBucketDb.getDataUpdator().updateSpendingBucketRecord(spendingBktDTO);
+				// Added to handle the concurrency
+				try {
+					spendingBucketDb.getDataUpdator().deductFromCurrentBucketOfSpendingBucket(spendingBktDTO.getMsisdn(),amount);
+				} catch (SpendingBucketDBException se){
+					if (se.getCode() != null && se.getCode().equalsIgnoreCase(SpendingBucketConstants.SPENDING_BUCKET_NO_FUNDS_AVAILABLE_IN_CURRENT_BUCKET_ERROR_CODE)) {
+						log.error("No money available in current bucket for MSISDN "+endUserIdentifier+" ,for requested amount : "+amount +
+								" Hence deleting the created reservation with reserveID "+spendingBktReservationsDTO.getReservationId());
+						spendingBucketDb.getDataDeletor().deleteSpendingBktRevByRevId(spendingBktReservationsDTO.getReservationId());
+						throw new ServiceException("Requested reserve amount "+amount+" is not available in current bucket for MSISDN "+endUserIdentifier 
+								,SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE,
+										SpendingBucketUtil.getPropertyValue(SpendingBucketConstants.SPENDING_BUCKET_NO_MONEY_AVAILABLE_IN_CURRENT_BUCKET)));
+					} else {
+						throw se;
+					}
+				}
+
+				return billingTxtParam.getReservationId();
+			}
+			/*else{
+				log.error("Requested money is NOT available in current bucket");
+				throw new ServiceException("Money is not available",SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE, SpendingBucketUtil.getPropertyValue(SpendingBucketConstants.SPENDING_BUCKET_NO_MONEY_AVAILABLE_IN_CURRENT_BUCKET)));
+			}	*/
+		/*else{
+			log.error("No money available in current bucket to do the reservation");
+			throw new ServiceException("No money available in current bucket to do the reservation"
+					,SpendingBucketUtil.serviceErrorResponse(SpendingBucketConstants.SPENDING_BUCKET_SVC_ERROR_CODE, SpendingBucketUtil.getPropertyValue(SpendingBucketConstants.SPENDING_BUCKET_NO_MONEY_AVAILABLE_IN_CURRENT_BUCKET)));
+		}*/
+
+
+	
+
+	public Boolean checkForRenewal(BillingTxtParameter billingTxtParam){
+
+		if(SpendingBucketUtil.isNotNullOrEmpty(billingTxtParam.getPurchaseType())){
+			return "renewSubscr".equals(billingTxtParam.getPurchaseType());
+		}
+
+		return false;
+	}
+
+	/*private void createCurrentReservationRecord(SpendingBktReservationsDTO spendingBktReservationsDTO) throws SpendingBucketDBException {
+		try {
+			spendingBucketDb.getDataCreator().createSpendingBucketReservationRecord(spendingBktReservationsDTO);
+			} catch (SpendingBucketDBException sbdbex){
+			log.debug("Error Code while creating the SpendingBucket reservation is " +sbdbex.getCode());
+			if (sbdbex.getCode().equals(SpendingBucketConstants.SPENDING_BUCKET_UNIQUE_CONSTRAINT_ERROR_CODE)){
+				log.debug("ConstarintViolationError while creating the SpendingBucket reservation, Hence proceeding further");
+			} else {	
+				throw sbdbex;
+			}
+		}
+	}*/
+
+
+}
